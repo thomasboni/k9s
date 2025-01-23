@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of K9s
+
 package dao
 
 import (
@@ -12,6 +15,19 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+type Grace int64
+
+const (
+	// DefaultGrace uses delete default termination policy.
+	DefaultGrace Grace = -1
+
+	// ForceGrace sets delete grace-period to 0.
+	ForceGrace Grace = 0
+
+	// NowGrace set delete grace-period to 1,
+	NowGrace Grace = 1
+)
+
 var _ Describer = (*Generic)(nil)
 
 // Generic represents a generic resource.
@@ -24,18 +40,15 @@ type Generic struct {
 func (g *Generic) List(ctx context.Context, ns string) ([]runtime.Object, error) {
 	labelSel, _ := ctx.Value(internal.KeyLabels).(string)
 	if client.IsAllNamespace(ns) {
-		ns = client.AllNamespaces
+		ns = client.BlankNamespace
 	}
 
-	var (
-		ll  *unstructured.UnstructuredList
-		err error
-	)
 	dial, err := g.dynClient()
 	if err != nil {
 		return nil, err
 	}
 
+	var ll *unstructured.UnstructuredList
 	if client.IsClusterScoped(ns) {
 		ll, err = dial.List(ctx, metav1.ListOptions{LabelSelector: labelSel})
 	} else {
@@ -55,12 +68,13 @@ func (g *Generic) List(ctx context.Context, ns string) ([]runtime.Object, error)
 
 // Get returns a given resource.
 func (g *Generic) Get(ctx context.Context, path string) (runtime.Object, error) {
-	var opts metav1.GetOptions
 	ns, n := client.Namespaced(path)
 	dial, err := g.dynClient()
 	if err != nil {
 		return nil, err
 	}
+
+	var opts metav1.GetOptions
 	if client.IsClusterScoped(ns) {
 		return dial.Get(ctx, n, opts)
 	}
@@ -88,9 +102,9 @@ func (g *Generic) ToYAML(path string, showManaged bool) (string, error) {
 }
 
 // Delete deletes a resource.
-func (g *Generic) Delete(ctx context.Context, path string, propagation *metav1.DeletionPropagation, force bool) error {
+func (g *Generic) Delete(ctx context.Context, path string, propagation *metav1.DeletionPropagation, grace Grace) error {
 	ns, n := client.Namespaced(path)
-	auth, err := g.Client().CanI(ns, g.gvr.String(), []string{client.DeleteVerb})
+	auth, err := g.Client().CanI(ns, g.gvrStr(), n, []string{client.DeleteVerb})
 	if err != nil {
 		return err
 	}
@@ -98,14 +112,13 @@ func (g *Generic) Delete(ctx context.Context, path string, propagation *metav1.D
 		return fmt.Errorf("user is not authorized to delete %s", path)
 	}
 
-	const defaultKillGrace = 1
-	var grace int64
-	if force {
-		grace = defaultKillGrace
+	var gracePeriod *int64
+	if grace != DefaultGrace {
+		gracePeriod = (*int64)(&grace)
 	}
 	opts := metav1.DeleteOptions{
 		PropagationPolicy:  propagation,
-		GracePeriodSeconds: &grace,
+		GracePeriodSeconds: gracePeriod,
 	}
 
 	dial, err := g.dynClient()
